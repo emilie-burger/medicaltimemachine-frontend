@@ -1,0 +1,10 @@
+{
+  "description": "Access a comprehensive medical resource platform featuring a user-friendly dashboard for healthcare professionals to login and explore vital information.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
