@@ -685,6 +685,13 @@ function AncientMedicineContent() {
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {egyptianIngredients.map(([name, text]) => (
             <article key={name} className="rounded-2xl border border-[#e1e7e1] bg-[#fafbf8] p-4">
+              {name === "Honey" && (
+                <img
+                  src="/honey.webp"
+                  alt="Honey"
+                  className="mb-4 aspect-video w-full rounded-xl object-cover"
+                />
+              )}
               <h3 className="font-semibold text-[#345247]">{name}</h3>
               <p className="mt-2 text-sm leading-6 text-[#687870]">{text}</p>
             </article>
