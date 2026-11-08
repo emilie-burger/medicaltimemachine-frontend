@@ -100,12 +100,154 @@ function formatCurrentDate() {
   return `${date.toLocaleDateString("en", { weekday: "long" })}, ${day}${suffix} of ${month}`;
 }
 
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [showPassword, setShowPassword] = useState(false);
+type StoredAccount = {
+  email: string;
+  firstName?: string;
+  salt: string;
+  passwordHash: string;
+};
 
-  function submit(event: FormEvent) {
+const ACCOUNT_STORAGE_KEY = "medical-time-machine.accounts.v1";
+const PASSWORD_HASH_ITERATIONS = 310_000;
+
+function isStoredAccount(value: unknown): value is StoredAccount {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "email" in value &&
+    typeof value.email === "string" &&
+    (!("firstName" in value) || typeof value.firstName === "string") &&
+    "salt" in value &&
+    typeof value.salt === "string" &&
+    "passwordHash" in value &&
+    typeof value.passwordHash === "string"
+  );
+}
+
+function loadAccounts(): StoredAccount[] {
+  let serialized: string | null;
+  try {
+    serialized = window.localStorage.getItem(ACCOUNT_STORAGE_KEY);
+  } catch {
+    throw new Error("Browser storage is unavailable. Enable storage and try again.");
+  }
+
+  if (!serialized) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw new Error("Saved account data could not be read.");
+  }
+
+  if (!Array.isArray(parsed) || !parsed.every(isStoredAccount)) {
+    throw new Error("Saved account data is invalid.");
+  }
+
+  return parsed;
+}
+
+function saveAccounts(accounts: StoredAccount[]) {
+  try {
+    window.localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accounts));
+  } catch {
+    throw new Error("Your account could not be saved in this browser. Check available storage and try again.");
+  }
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return window.btoa(binary);
+}
+
+async function hashPassword(password: string, salt?: string) {
+  if (!window.crypto?.subtle) {
+    throw new Error("Secure password hashing is unavailable in this browser.");
+  }
+
+  const saltBytes = salt
+    ? Uint8Array.from(window.atob(salt), (character) => character.charCodeAt(0))
+    : window.crypto.getRandomValues(new Uint8Array(16));
+  const key = await window.crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const derivedBits = await window.crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: saltBytes, iterations: PASSWORD_HASH_ITERATIONS, hash: "SHA-256" },
+    key,
+    256,
+  );
+
+  return { salt: salt ?? encodeBase64(saltBytes), passwordHash: encodeBase64(new Uint8Array(derivedBits)) };
+}
+
+function hashesMatch(first: string, second: string): boolean {
+  if (first.length !== second.length) return false;
+  let difference = 0;
+  for (let index = 0; index < first.length; index += 1) {
+    difference |= first.charCodeAt(index) ^ second.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+async function createLocalAccount(firstName: string, email: string, password: string) {
+  const normalizedFirstName = firstName.trim();
+  if (!normalizedFirstName) {
+    throw new Error("Enter your first name.");
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const accounts = loadAccounts();
+  if (accounts.some((account) => account.email === normalizedEmail)) {
+    throw new Error("An account with that email already exists in this browser.");
+  }
+
+  const credentials = await hashPassword(password);
+  saveAccounts([...accounts, { firstName: normalizedFirstName, email: normalizedEmail, ...credentials }]);
+}
+
+async function verifyLocalAccount(email: string, password: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const account = loadAccounts().find((savedAccount) => savedAccount.email === normalizedEmail);
+  if (!account) throw new Error("Email or password is incorrect.");
+
+  const credentials = await hashPassword(password, account.salt);
+  if (!hashesMatch(credentials.passwordHash, account.passwordHash)) {
+    throw new Error("Email or password is incorrect.");
+  }
+
+  return account.firstName || "Member";
+}
+
+function Login({
+  onLogin,
+  onCreateAccount,
+}: {
+  onLogin: (email: string, password: string) => Promise<void>;
+  onCreateAccount: () => void;
+}) {
+  const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent) {
     event.preventDefault();
-    onLogin();
+    setError("");
+    setSubmitting(true);
+    try {
+      await onLogin(email, password);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to sign in.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -143,7 +285,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
               <span className="mb-2 block text-sm font-semibold text-[#29453d]">Email address</span>
               <span className="input-shell">
                 <Icon name="mail" size={19} />
-                <input required type="email" placeholder="you@example.com" defaultValue="alex@medora.health" />
+                <input required type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} />
               </span>
             </label>
             <label className="block">
@@ -153,7 +295,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
               </span>
               <span className="input-shell">
                 <Icon name="lock" size={19} />
-                <input required type={showPassword ? "text" : "password"} defaultValue="medorahealth" />
+                <input required type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
                 <button
                   type="button"
                   className="text-xs font-bold uppercase tracking-wider text-[#608077]"
@@ -163,15 +305,127 @@ function Login({ onLogin }: { onLogin: () => void }) {
                 </button>
               </span>
             </label>
-            <button className="primary-button mt-2 w-full" type="submit">
-              Sign in <Icon name="arrow" size={18} />
+            {error && <p className="text-sm text-red-700" role="alert">{error}</p>}
+            <button className="primary-button mt-2 w-full disabled:cursor-wait disabled:opacity-70" type="submit" disabled={submitting}>
+              {submitting ? "Signing in..." : "Sign in"} <Icon name="arrow" size={18} />
             </button>
           </form>
           <p className="mt-8 text-center text-sm text-[#728079]">
-            New to Medical Time Machine? <button className="font-semibold text-[#256554] hover:underline">Create an account</button>
+            New to Medical Time Machine? <button type="button" onClick={onCreateAccount} className="font-semibold text-[#256554] hover:underline">Create an account</button>
           </p>
           <p className="mt-12 text-center text-xs leading-5 text-[#87928e]">
             For educational purposes only. Always consult a qualified healthcare professional for medical advice.
+          </p>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function CreateAccount({
+  onCreateAccount,
+  onBackToLogin,
+}: {
+  onCreateAccount: (firstName: string, email: string, password: string) => Promise<void>;
+  onBackToLogin: () => void;
+}) {
+  const [showPassword, setShowPassword] = useState(false);
+  const [firstName, setFirstName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (password !== confirmPassword) {
+      setError("The passwords do not match.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await onCreateAccount(firstName, email, password);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to create your account.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-[#f6f4ef] lg:grid lg:grid-cols-[1.08fr_0.92fr]">
+      <section className="relative hidden overflow-hidden bg-[#143c32] p-12 text-white lg:flex lg:flex-col">
+        <div className="absolute -left-36 bottom-[-260px] h-[560px] w-[560px] rounded-full border border-white/10" />
+        <div className="absolute -left-20 bottom-[-200px] h-[420px] w-[420px] rounded-full border border-white/10" />
+        <Brand light />
+        <div className="relative my-auto max-w-[610px] px-[5%]">
+          <div className="mb-8 flex h-16 w-16 items-center justify-center rounded-2xl bg-[#d9f29c] text-[#173a31]">
+            <Icon name="stethoscope" size={30} />
+          </div>
+          <h1 className="font-serif text-6xl leading-[1.07] tracking-[-0.04em]">Start exploring.</h1>
+          <p className="mt-7 max-w-lg text-lg leading-8 text-[#c7d9d2]">
+            Create an account to explore the people, practices, and discoveries that shaped medicine.
+          </p>
+        </div>
+        <div className="relative flex items-center gap-3 text-sm text-[#abc5bc]">
+          <Icon name="shield" size={18} />
+          <span>Your account is saved in this browser only.</span>
+        </div>
+      </section>
+
+      <section className="flex min-h-screen items-center justify-center px-6 py-10 sm:px-12">
+        <div className="w-full max-w-[460px]">
+          <div className="mb-12 lg:hidden"><Brand /></div>
+          <p className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-[#6b857c]">Join us</p>
+          <h2 className="font-serif text-[42px] leading-tight text-[#14372f] sm:text-5xl">Create your account</h2>
+          <p className="mt-4 text-[#66756f]">Enter your email and choose a password to get started.</p>
+
+          <form onSubmit={submit} className="mt-10 space-y-5">
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-[#29453d]">First name</span>
+              <span className="input-shell">
+                <Icon name="user" size={19} />
+                <input required autoComplete="given-name" maxLength={80} value={firstName} onChange={(event) => setFirstName(event.target.value)} />
+              </span>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-[#29453d]">Email address</span>
+              <span className="input-shell">
+                <Icon name="mail" size={19} />
+                <input required type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} />
+              </span>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-[#29453d]">Password</span>
+              <span className="input-shell">
+                <Icon name="lock" size={19} />
+                <input required minLength={8} type={showPassword ? "text" : "password"} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              </span>
+              <span className="mt-2 block text-xs text-[#728079]">Use at least 8 characters.</span>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-[#29453d]">Re-enter password</span>
+              <span className="input-shell">
+                <Icon name="lock" size={19} />
+                <input required minLength={8} type={showPassword ? "text" : "password"} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
+                <button type="button" className="text-xs font-bold uppercase tracking-wider text-[#608077]" onClick={() => setShowPassword(!showPassword)}>
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </span>
+            </label>
+            {error && <p className="text-sm text-red-700" role="alert">{error}</p>}
+            <p className="text-xs leading-5 text-[#87928e]">
+              This demo saves your account on this browser and device only. Passwords are stored as salted hashes, not plaintext.
+            </p>
+            <button className="primary-button mt-2 w-full disabled:cursor-wait disabled:opacity-70" type="submit" disabled={submitting}>
+              {submitting ? "Creating account..." : "Create account"} <Icon name="arrow" size={18} />
+            </button>
+          </form>
+          <p className="mt-8 text-center text-sm text-[#728079]">
+            Already have an account? <button type="button" onClick={onBackToLogin} className="font-semibold text-[#256554] hover:underline">Sign in</button>
           </p>
         </div>
       </section>
@@ -196,11 +450,13 @@ const navItems: { page: Page; label: string; icon: IconName }[] = [
 function Shell({
   page,
   setPage,
+  firstName,
   onLogout,
   children,
 }: {
   page: Page;
   setPage: (page: Page) => void;
+  firstName: string;
   onLogout: () => void;
   children: ReactNode;
 }) {
@@ -243,9 +499,9 @@ function Shell({
         </nav>
         <div className="mt-auto rounded-2xl bg-white/[0.07] p-4">
           <div className="mb-3 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#d7efa0] font-serif font-bold text-[#173c32]">AM</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#d7efa0] font-serif font-bold text-[#173c32]">{firstName.charAt(0).toUpperCase()}</div>
             <div>
-              <p className="text-sm font-semibold text-white">Alex Morgan</p>
+              <p className="text-sm font-semibold text-white">{firstName}</p>
               <p className="text-xs text-white/50">Personal account</p>
             </div>
           </div>
@@ -261,10 +517,10 @@ function Shell({
           <p className="hidden text-sm text-[#64776f] sm:block">{todayLabel}</p>
           <div className="ml-auto flex items-center gap-3">
             <div className="hidden text-right sm:block">
-              <p className="text-sm font-semibold">Alex Morgan</p>
+              <p className="text-sm font-semibold">{firstName}</p>
               <p className="text-xs text-[#77877f]">Member since 2024</p>
             </div>
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#dce8de] text-sm font-bold">AM</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#dce8de] text-sm font-bold">{firstName.charAt(0).toUpperCase()}</div>
           </div>
         </header>
         <main className="mx-auto max-w-[1250px] p-5 sm:p-9 lg:p-10">{children}</main>
@@ -273,28 +529,23 @@ function Shell({
   );
 }
 
-function Dashboard() {
+function Dashboard({ navigate }: { navigate: (page: Page) => void }) {
   return (
     <article className="content-card">
       <div className="card-heading">
         <div><p className="eyebrow">Explore history</p><h2 className="section-title">Medicine through the ages</h2></div>
       </div>
       <ul className="mt-6 grid gap-3 sm:grid-cols-2">
-        {[
-          "Caveman & Ancient Medicine",
-          "Medieval Medicine",
-          "Renaissance Breakthroughs",
-          "Germ Theory",
-          "Historical breakthroughs",
-          "Modern Medicine and Technology",
-          "Youth/Child health today",
-          "Myths, mistakes and weird remedies",
-          "Neurodevelopment disorders in youth/children",
-          "Get involved",
-        ].map((topic) => (
-          <li key={topic} className="flex items-start gap-3 rounded-xl border border-[#e1e7e1] px-3.5 py-3 text-sm font-semibold leading-5 text-[#345247]">
-            <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#89a957]" />
-            {topic}
+        {navItems.filter((item) => item.page !== "dashboard").map((item) => (
+          <li key={item.page}>
+            <button
+              type="button"
+              onClick={() => navigate(item.page)}
+              className="flex w-full items-start gap-3 rounded-xl border border-[#e1e7e1] px-3.5 py-3 text-left text-sm font-semibold leading-5 text-[#345247] transition hover:border-[#9cb2a8] hover:bg-[#f7faf5] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#357565]"
+            >
+              <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[#89a957]" />
+              {item.label}
+            </button>
           </li>
         ))}
       </ul>
@@ -806,13 +1057,47 @@ function AncientMedicineContent() {
 
 export default function App() {
   const [signedIn, setSignedIn] = useState(false);
+  const [firstName, setFirstName] = useState("");
   const [page, setPage] = useState<Page>("dashboard");
+  const [authMode, setAuthMode] = useState<"sign-in" | "create-account">("sign-in");
 
-  if (!signedIn) return <Login onLogin={() => setSignedIn(true)} />;
+  if (!signedIn && authMode === "create-account") {
+    return (
+      <CreateAccount
+        onCreateAccount={async (firstName, email, password) => {
+          await createLocalAccount(firstName, email, password);
+          setFirstName(firstName.trim());
+          setSignedIn(true);
+          setPage("dashboard");
+        }}
+        onBackToLogin={() => setAuthMode("sign-in")}
+      />
+    );
+  }
+
+  if (!signedIn) {
+    return (
+      <Login
+        onLogin={async (email, password) => {
+          setFirstName(await verifyLocalAccount(email, password));
+          setSignedIn(true);
+        }}
+        onCreateAccount={() => setAuthMode("create-account")}
+      />
+    );
+  }
 
   return (
-    <Shell page={page} setPage={setPage} onLogout={() => setSignedIn(false)}>
-      {page === "dashboard" && <Dashboard />}
+    <Shell
+      page={page}
+      setPage={setPage}
+      firstName={firstName}
+      onLogout={() => {
+        setSignedIn(false);
+        setFirstName("");
+      }}
+    >
+      {page === "dashboard" && <Dashboard navigate={setPage} />}
       {page === "modern-medicine-technology" && <Medications />}
       {page === "historical-breakthroughs" && <Wellness />}
       {page !== "dashboard" && page !== "modern-medicine-technology" && page !== "historical-breakthroughs" && (
